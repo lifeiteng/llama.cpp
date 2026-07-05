@@ -26,6 +26,13 @@
 #include <functional>
 #include <float.h>
 
+// 64-bit seek on a FILE* (mirrors gguf_fseek in ggml/src/gguf.cpp)
+#ifdef _WIN32
+#    define clip_fseek _fseeki64
+#else
+#    define clip_fseek fseeko
+#endif
+
 struct clip_logger_state g_logger_state = {clip_log_callback_default, NULL};
 
 //#define CLIP_DEBUG_FUNCTIONS
@@ -1040,6 +1047,10 @@ struct clip_model_loader {
 
     std::string fname;
 
+    // optional caller-owned FILE* exposing the gguf from byte 0; when set, all reads go
+    // through it (fname is kept for logging only) and it is never closed by the loader
+    FILE * file = nullptr;
+
     size_t model_size = 0; // in bytes
 
     bool has_vision = false;
@@ -1052,8 +1063,10 @@ struct clip_model_loader {
     clip_model_loader(const char * fname,
             bool skip_tensors = false,
             mtmd_progress_callback progress_cb = nullptr,
-            void * progress_user_data = nullptr)
+            void * progress_user_data = nullptr,
+            FILE * file_ptr = nullptr)
         : fname(fname),
+          file(file_ptr),
           progress_callback(progress_cb),
           progress_callback_user_data(progress_user_data) {
         struct ggml_context * meta = nullptr;
@@ -1063,7 +1076,9 @@ struct clip_model_loader {
             /*.ctx      = */ &meta,
         };
 
-        ctx_gguf = gguf_context_ptr(gguf_init_from_file(fname, params));
+        ctx_gguf = gguf_context_ptr(file
+            ? gguf_init_from_file_ptr(file, params)
+            : gguf_init_from_file(fname, params));
         if (!ctx_gguf.get()) {
             throw std::runtime_error(string_format("%s: failed to load CLIP model from %s. Does this file exist?\n", __func__, fname));
         }
@@ -1767,10 +1782,33 @@ struct clip_model_loader {
         std::map<std::string, size_t> tensor_offset;
         std::vector<ggml_tensor *> tensors_to_load;
 
-        auto fin = open_ifstream_binary(fname);
-        if (!fin) {
-            throw std::runtime_error(string_format("%s: failed to open %s\n", __func__, fname.c_str()));
+        // when a caller-owned FILE* is set, read through it and never open/close a stream here
+        std::ifstream fin;
+        if (!file) {
+            fin = open_ifstream_binary(fname);
+            if (!fin) {
+                throw std::runtime_error(string_format("%s: failed to open %s\n", __func__, fname.c_str()));
+            }
         }
+        auto seek_read = [&](size_t offset, void * dst, size_t len, const char * what) {
+            if (file) {
+                if (clip_fseek(file, (int64_t) offset, SEEK_SET) != 0) {
+                    throw std::runtime_error(string_format("%s: failed to seek for %s\n", __func__, what));
+                }
+                if (fread(dst, 1, len, file) != len) {
+                    throw std::runtime_error(string_format("%s: failed to read %s\n", __func__, what));
+                }
+            } else {
+                fin.seekg(offset, std::ios::beg);
+                if (!fin) {
+                    throw std::runtime_error(string_format("%s: failed to seek for %s\n", __func__, what));
+                }
+                fin.read(reinterpret_cast<char *>(dst), len);
+                if (!fin) {
+                    throw std::runtime_error(string_format("%s: failed to read %s\n", __func__, what));
+                }
+            }
+        };
 
         // TODO @ngxson : support both audio and video in the future
         const char * prefix = model.modality == CLIP_MODALITY_AUDIO ? "a" : "v";
@@ -1821,9 +1859,8 @@ struct clip_model_loader {
                 return default_val;
             }
             size_t offset = it->second;
-            fin.seekg(offset, std::ios::beg);
             float value;
-            fin.read(reinterpret_cast<char*>(&value), sizeof(float));
+            seek_read(offset, &value, sizeof(float), name.c_str());
             return value;
         };
 
@@ -2829,18 +2866,14 @@ struct clip_model_loader {
                     auto it_off = tensor_offset.find(t->name);
                     GGML_ASSERT(it_off != tensor_offset.end() && "no offset for tensor");
                     const size_t offset = it_off->second;
-                    fin.seekg(offset, std::ios::beg);
-                    if (!fin) {
-                        throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
-                    }
                     size_t num_bytes = ggml_nbytes(cur);
                     if (ggml_backend_buft_is_host(buft)) {
                         // for the CPU and Metal backend, we can read directly into the tensor
-                        fin.read(reinterpret_cast<char *>(cur->data), num_bytes);
+                        seek_read(offset, cur->data, num_bytes, t->name);
                     } else {
                         // read into a temporary buffer first, then copy to device memory
                         read_buf.resize(num_bytes);
-                        fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
+                        seek_read(offset, read_buf.data(), num_bytes, t->name);
                         ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
                     }
                     data_loaded += num_bytes;
@@ -2855,7 +2888,9 @@ struct clip_model_loader {
             } else {
                 LOG_DBG("%s: no_alloc is set, skipping tensor data loading (%zu tensors)\n", __func__, tensors_to_load.size());
             }
-            fin.close();
+            if (!file) {
+                fin.close();
+            }
         }
 
     }
@@ -3168,7 +3203,7 @@ struct clip_model_loader {
     }
 };
 
-struct clip_init_result clip_init(const char * fname, struct clip_context_params ctx_params) {
+static struct clip_init_result clip_init_impl(const char * fname, FILE * file, struct clip_context_params ctx_params) {
     clip_ctx * ctx_vision = nullptr;
     clip_ctx * ctx_audio = nullptr;
 
@@ -3176,7 +3211,8 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
         clip_model_loader loader(fname,
             /* skip_tensors */ false,
             ctx_params.progress_callback,
-            ctx_params.progress_callback_user_data);
+            ctx_params.progress_callback_user_data,
+            file);
         bool skip_audio = false;
 
         if (loader.has_vision) {
@@ -3213,6 +3249,18 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
     }
 
     return {ctx_vision, ctx_audio};
+}
+
+struct clip_init_result clip_init(const char * fname, struct clip_context_params ctx_params) {
+    return clip_init_impl(fname, /* file */ nullptr, ctx_params);
+}
+
+struct clip_init_result clip_init_from_file_ptr(FILE * file, const char * debug_name, struct clip_context_params ctx_params) {
+    if (!file) {
+        LOG_ERR("%s: file is NULL\n", __func__);
+        return {nullptr, nullptr};
+    }
+    return clip_init_impl(debug_name ? debug_name : "<mmproj FILE*>", file, ctx_params);
 }
 
 struct clip_cap clip_get_cap(const char * fname) {

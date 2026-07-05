@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 #include <map>
@@ -123,6 +124,14 @@ MTMD_API struct mtmd_context_params mtmd_context_params_default(void);
 MTMD_API mtmd_context * mtmd_init_from_file(const char * mmproj_fname,
                                             const struct llama_model * text_model,
                                             const struct mtmd_context_params ctx_params);
+
+// initialize the mtmd context from an open FILE pointer exposing the mmproj
+// gguf from byte 0 (mirrors llama_model_load_from_file_ptr). The FILE* is
+// caller-owned: it must stay valid until this call returns and is never
+// closed by mtmd. return nullptr on failure
+MTMD_API mtmd_context * mtmd_init_from_file_ptr(FILE * mmproj_file,
+                                                const struct llama_model * text_model,
+                                                const struct mtmd_context_params ctx_params);
 
 MTMD_API void mtmd_free(mtmd_context * ctx);
 

@@ -303,7 +303,8 @@ struct mtmd_context {
     mtmd_context(const char * mmproj_fname,
                    const llama_model * text_model,
                    const mtmd_context_params & ctx_params,
-                   bool no_alloc = false) :
+                   bool no_alloc = false,
+                   FILE * mmproj_file = nullptr) : // caller-owned; see mtmd_init_from_file_ptr
         print_timings   (ctx_params.print_timings),
         n_threads       (ctx_params.n_threads),
         media_marker    (ctx_params.media_marker),
@@ -351,7 +352,9 @@ struct mtmd_context {
             /* progress_callback_user_data */ ctx_params.progress_callback_user_data,
         };
 
-        auto res = clip_init(mmproj_fname, ctx_clip_params);
+        auto res = mmproj_file
+            ? clip_init_from_file_ptr(mmproj_file, mmproj_fname, ctx_clip_params)
+            : clip_init(mmproj_fname, ctx_clip_params);
         ctx_v = res.ctx_v;
         ctx_a = res.ctx_a;
         if (!ctx_v && !ctx_a) {
@@ -801,6 +804,21 @@ mtmd_context * mtmd_init_from_file(const char * mmproj_fname,
         const struct mtmd_context_params ctx_params) {
     try {
         return new mtmd_context(mmproj_fname, text_model, ctx_params);
+    } catch (const std::exception & e) {
+        LOG_ERR("%s: error: %s\n", __func__, e.what());
+        return nullptr;
+    }
+}
+
+mtmd_context * mtmd_init_from_file_ptr(FILE * mmproj_file,
+        const struct llama_model * text_model,
+        const struct mtmd_context_params ctx_params) {
+    if (!mmproj_file) {
+        LOG_ERR("%s: mmproj_file is NULL\n", __func__);
+        return nullptr;
+    }
+    try {
+        return new mtmd_context("<mmproj FILE*>", text_model, ctx_params, /* no_alloc */ false, mmproj_file);
     } catch (const std::exception & e) {
         LOG_ERR("%s: error: %s\n", __func__, e.what());
         return nullptr;

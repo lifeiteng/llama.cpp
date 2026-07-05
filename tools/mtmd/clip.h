@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <map>
 
@@ -64,6 +65,12 @@ struct clip_init_result {
 };
 
 struct clip_init_result clip_init(const char * fname, struct clip_context_params ctx_params);
+
+// Load from an open FILE pointer exposing the gguf from byte 0 (mirrors
+// llama_model_load_from_file_ptr). The FILE* is caller-owned: it must stay
+// valid until this call returns and is never closed by clip. debug_name is
+// used for logging only (may be NULL).
+struct clip_init_result clip_init_from_file_ptr(FILE * file, const char * debug_name, struct clip_context_params ctx_params);
 
 void clip_free(struct clip_ctx * ctx);
 
