@@ -14,8 +14,8 @@ using llama_mmaps  = std::vector<std::unique_ptr<llama_mmap>>;
 using llama_mlocks = std::vector<std::unique_ptr<llama_mlock>>;
 
 struct llama_file {
-    llama_file(const char * fname, const char * mode, bool use_direct_io = false);
-    llama_file(FILE * file);
+    llama_file(const char * fname, const char * mode, bool use_direct_io = false, size_t size_limit = 0);
+    llama_file(FILE * file, size_t size_limit = 0);
     ~llama_file();
 
     size_t tell() const;

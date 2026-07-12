@@ -83,7 +83,8 @@ struct llama_file::impl {
         return ret;
     }
 
-    impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false) {
+    impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false,
+         size_t size_limit = 0) {
         fp = ggml_fopen(fname, mode);
         if (fp == NULL) {
             throw std::runtime_error(format("failed to open %s: %s", fname, strerror(errno)));
@@ -91,14 +92,22 @@ struct llama_file::impl {
         fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
         seek(0, SEEK_END);
         size = tell();
+        if (size_limit > size) {
+            throw std::runtime_error("model file size limit exceeds physical file size");
+        }
+        if (size_limit != 0) size = size_limit;
         seek(0, SEEK_SET);
     }
 
-    impl(FILE * file) : owns_fp(false) {
+    impl(FILE * file, size_t size_limit = 0) : owns_fp(false) {
         fp = file;
         fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
         seek(0, SEEK_END);
         size = tell();
+        if (size_limit > size) {
+            throw std::runtime_error("model file size limit exceeds physical file size");
+        }
+        if (size_limit != 0) size = size_limit;
         seek(0, SEEK_SET);
     }
 
@@ -180,7 +189,8 @@ struct llama_file::impl {
         }
     }
 #else
-    impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false) : fname(fname) {
+    impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false,
+         size_t size_limit = 0) : fname(fname), size_limit(size_limit) {
 #ifdef __linux__
         // Try unbuffered I/O for read only
         if (use_direct_io && std::strcmp(mode, "rb") == 0) {
@@ -203,6 +213,7 @@ struct llama_file::impl {
             fstat(fd, &file_stats);
 
             size = file_stats.st_size;
+            apply_size_limit();
             alignment = file_stats.st_blksize;
 
             off_t ret = lseek(fd, 0, SEEK_SET);
@@ -222,14 +233,23 @@ struct llama_file::impl {
         }
         seek(0, SEEK_END);
         size = tell();
+        apply_size_limit();
         seek(0, SEEK_SET);
     }
 
-    impl(FILE * file) : fname("(file*)"), owns_fp(false) {
+    impl(FILE * file, size_t size_limit = 0) : fname("(file*)"), size_limit(size_limit), owns_fp(false) {
         fp = file;
         seek(0, SEEK_END);
         size = tell();
+        apply_size_limit();
         seek(0, SEEK_SET);
+    }
+
+    void apply_size_limit() {
+        if (size_limit > size) {
+            throw std::runtime_error("model file size limit exceeds physical file size");
+        }
+        if (size_limit != 0) size = size_limit;
     }
 
     size_t tell() const {
@@ -389,16 +409,17 @@ struct llama_file::impl {
     }
 
     size_t alignment = 1;
+    size_t size_limit = 0;
 
     FILE * fp{};
     size_t size{};
     bool owns_fp = true;
 };
 
-llama_file::llama_file(const char * fname, const char * mode, const bool use_direct_io) :
-    pimpl(std::make_unique<impl>(fname, mode, use_direct_io)) {}
+llama_file::llama_file(const char * fname, const char * mode, const bool use_direct_io, size_t size_limit) :
+    pimpl(std::make_unique<impl>(fname, mode, use_direct_io, size_limit)) {}
 
-llama_file::llama_file(FILE * file) : pimpl(std::make_unique<impl>(file)) {}
+llama_file::llama_file(FILE * file, size_t size_limit) : pimpl(std::make_unique<impl>(file, size_limit)) {}
 
 llama_file::~llama_file() = default;
 

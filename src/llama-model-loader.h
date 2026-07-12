@@ -128,6 +128,7 @@ struct llama_model_loader {
         FILE * file,
         bool use_mmap,
         bool use_direct_io,
+        size_t model_file_size,
         bool check_tensors,
         bool no_alloc,
         const llama_model_kv_override * param_overrides_p,

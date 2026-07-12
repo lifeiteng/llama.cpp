@@ -518,6 +518,7 @@ llama_model_loader::llama_model_loader(
         FILE * file,
         bool use_mmap,
         bool use_direct_io,
+        size_t model_file_size,
         bool check_tensors,
         bool no_alloc,
         const llama_model_kv_override * param_overrides_p,
@@ -553,7 +554,7 @@ llama_model_loader::llama_model_loader(
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
-        files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
+        files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io, model_file_size));
         contexts.emplace_back(ctx);
 
         if (use_mmap && use_direct_io) {
@@ -566,7 +567,7 @@ llama_model_loader::llama_model_loader(
 
                 // reopen file using std::fopen for mmap
                 files.pop_back();
-                files.emplace_back(new llama_file(fname.c_str(), "rb", false));
+                files.emplace_back(new llama_file(fname.c_str(), "rb", false, model_file_size));
             }
         }
 
@@ -588,6 +589,9 @@ llama_model_loader::llama_model_loader(
 
         // Load additional GGML contexts
         if (n_split > 1) {
+            if (model_file_size != 0) {
+                throw std::runtime_error("model_file_size is not supported for split GGUF models");
+            }
             // make sure the main file is loaded first
             uint16_t idx = 0;
             const std::string kv_split_no = llm_kv(LLM_KV_SPLIT_NO);
@@ -679,7 +683,7 @@ llama_model_loader::llama_model_loader(
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
-        files.emplace_back(new llama_file(file));
+        files.emplace_back(new llama_file(file, model_file_size));
         contexts.emplace_back(ctx);
 
         // Save tensors data offset info of the main file.

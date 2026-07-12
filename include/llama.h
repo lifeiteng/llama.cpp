@@ -315,6 +315,10 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
+        // Restrict file-backed reads, mmap, prefetch, and mlock to this byte length.
+        // 0 uses the physical file size. Useful when a GGUF is the leading member of a larger file.
+        uint64_t model_file_size;
+
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
         bool use_mmap;        // use mmap if possible
