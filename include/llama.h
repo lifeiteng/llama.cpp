@@ -315,8 +315,11 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
-        // Restrict file-backed reads, mmap, prefetch, and mlock to this byte length.
-        // 0 uses the physical file size. Useful when a GGUF is the leading member of a larger file.
+        // Select a GGUF byte range within a larger file. At offset zero, a zero
+        // size uses the physical file end. A non-zero offset requires a
+        // non-zero size, skips eager mmap prefetch of preceding assets, and
+        // releases unused mapped prefixes after loading.
+        uint64_t model_file_offset;
         uint64_t model_file_size;
 
         // Keep the booleans together to avoid misalignment during copy-by-value.

@@ -36,13 +36,24 @@ struct llama_model_loader {
 
         ggml_tensor * tensor;
 
-        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
+        llama_tensor_weight(
+                const llama_file * file,
+                uint16_t idx,
+                const struct gguf_context * gguf_ctx,
+                ggml_tensor * tensor,
+                size_t range_offset = 0)
+            : idx(idx), tensor(tensor) {
             const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
             if (tensor_idx < 0) {
                 throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
             }
 
             offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
+            if (offs < range_offset) {
+                throw std::runtime_error(format(
+                    "tensor '%s' data starts before the selected model range",
+                    ggml_get_name(tensor)));
+            }
             if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
                 throw std::runtime_error(format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete", ggml_get_name(tensor)));
             }
@@ -101,6 +112,7 @@ struct llama_model_loader {
 
     size_t size_done = 0;
     size_t size_data = 0;
+    size_t model_file_offset = 0;
     std::vector<std::pair<size_t, size_t>> mmaps_used;
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
@@ -128,6 +140,7 @@ struct llama_model_loader {
         FILE * file,
         bool use_mmap,
         bool use_direct_io,
+        size_t model_file_offset,
         size_t model_file_size,
         bool check_tensors,
         bool no_alloc,

@@ -9,9 +9,18 @@
 #include <array>
 #include <cinttypes>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <regex>
+
+static int llama_model_loader_fseek(FILE * file, uint64_t offset) {
+#if defined(_WIN32)
+    return _fseeki64(file, static_cast<__int64>(offset), SEEK_SET);
+#else
+    return fseeko(file, static_cast<off_t>(offset), SEEK_SET);
+#endif
+}
 
 static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
@@ -518,12 +527,20 @@ llama_model_loader::llama_model_loader(
         FILE * file,
         bool use_mmap,
         bool use_direct_io,
+        size_t model_file_offset,
         size_t model_file_size,
         bool check_tensors,
         bool no_alloc,
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
-        : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
+        : metadata(meta),
+          set_tensor_data(set_tensor_data),
+          set_tensor_data_ud(set_tensor_data_ud) {
+    if (model_file_offset != 0 && model_file_size == 0) {
+        throw std::invalid_argument(
+            "model_file_size must be non-zero when model_file_offset is non-zero");
+    }
+    this->model_file_offset = model_file_offset;
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -545,7 +562,22 @@ llama_model_loader::llama_model_loader(
             /*.ctx      = */ &ctx,
         };
 
-        metadata_ptr.reset(gguf_init_from_file(fname.c_str(), params));
+        if (model_file_offset == 0) {
+            metadata_ptr.reset(gguf_init_from_file(fname.c_str(), params));
+        } else {
+            FILE * metadata_file = ggml_fopen(fname.c_str(), "rb");
+            if (metadata_file == nullptr ||
+                llama_model_loader_fseek(metadata_file, model_file_offset) != 0) {
+                if (metadata_file != nullptr) {
+                    fclose(metadata_file);
+                }
+                throw std::runtime_error(format(
+                    "%s: failed to seek model offset %zu in %s",
+                    __func__, model_file_offset, fname.c_str()));
+            }
+            metadata_ptr.reset(gguf_init_from_file_ptr(metadata_file, params));
+            fclose(metadata_file);
+        }
         metadata = metadata_ptr.get();
         if (metadata == nullptr) {
             throw std::runtime_error(format("%s: failed to load model from %s", __func__, fname.c_str()));
@@ -554,7 +586,14 @@ llama_model_loader::llama_model_loader(
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
         llm_kv = LLM_KV(llm_arch_from_string(arch_name));
 
-        files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io, model_file_size));
+        size_t model_file_end = model_file_size;
+        if (model_file_offset != 0 && model_file_size != 0) {
+            if (model_file_offset > SIZE_MAX - model_file_size) {
+                throw std::runtime_error("model file range overflows size_t");
+            }
+            model_file_end = model_file_offset + model_file_size;
+        }
+        files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io, model_file_end));
         contexts.emplace_back(ctx);
 
         if (use_mmap && use_direct_io) {
@@ -567,7 +606,7 @@ llama_model_loader::llama_model_loader(
 
                 // reopen file using std::fopen for mmap
                 files.pop_back();
-                files.emplace_back(new llama_file(fname.c_str(), "rb", false, model_file_size));
+                files.emplace_back(new llama_file(fname.c_str(), "rb", false, model_file_end));
             }
         }
 
@@ -582,15 +621,17 @@ llama_model_loader::llama_model_loader(
             }
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+            weights_map.emplace(
+                tensor_name,
+                llama_tensor_weight(files.back().get(), 0, metadata, cur, model_file_offset));
         }
         uint16_t n_split = 0;
         get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
 
         // Load additional GGML contexts
         if (n_split > 1) {
-            if (model_file_size != 0) {
-                throw std::runtime_error("model_file_size is not supported for split GGUF models");
+            if (model_file_offset != 0 || model_file_size != 0) {
+                throw std::runtime_error("model file ranges are not supported for split GGUF models");
             }
             // make sure the main file is loaded first
             uint16_t idx = 0;
@@ -668,6 +709,9 @@ llama_model_loader::llama_model_loader(
             LLAMA_LOG_INFO("%s: additional %d GGUFs metadata loaded.\n",  __func__, n_split - 1);
         }
     } else if (file != nullptr) {
+        if (model_file_offset != 0) {
+            throw std::runtime_error("model_file_offset is not supported for file pointer loading");
+        }
         struct ggml_context * ctx = NULL;
         struct gguf_init_params params = {
             /*.no_alloc = */ true,
@@ -1352,7 +1396,12 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
                 }
             }
 
-            std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch ? -1 : 0, is_numa);
+            // A non-zero GGUF offset means this file has an earlier sibling
+            // asset. Avoid eagerly paging that prefix in; unused pages are
+            // unmapped after the selected model tensors are bound.
+            const bool prefetch_file = prefetch && model_file_offset == 0;
+            std::unique_ptr<llama_mmap> mapping =
+                std::make_unique<llama_mmap>(file.get(), prefetch_file ? -1 : 0, is_numa);
             mmaps_used.emplace_back(mapping->size(), 0);
             if (mlock_mmaps) {
                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
